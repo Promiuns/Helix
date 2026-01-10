@@ -211,7 +211,7 @@ final class ExpressionParser {
                 default:
                     return .unaryMinus
                 }
-            case .numLiteral, .identifier:
+            case .numLiteral, .identifier, .rParen:
                 return .binaryMinus
             default:
                 return .notKnown
@@ -437,9 +437,8 @@ final class ExpressionParser {
                     let argNodes = Array(nodes[(i + 2)..<end])
 
                     let argSlices = splitByComma(argNodes)
-
                     let parsedArgs = try argSlices.map { try parseNodePipeline($0) }
-
+                    print(parsedArgs)
                     if creatingStruct {
                         result.append(.struct(name, parsedArgs))
                         creatingStruct.toggle()
@@ -700,6 +699,7 @@ final class ExpressionParser {
             guard numberStack.count == 1 else {
                 throw StatementError.temp
             }
+            
             return numberStack.first ?? .filler
         }
         return try parseNodePipeline(temp)
@@ -767,6 +767,7 @@ final class ExpressionParser {
     }
     
     func lower(_ node: Node) throws -> Expression {
+        print(node)
         switch node {
 
         case .number(let n):
