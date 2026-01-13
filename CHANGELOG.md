@@ -6,3 +6,6 @@
 - Added Light Mode compatibility (Still being worked on)
 - Added functionality to run button
 - Added syntax highlighting
+
+# PLANNED FEATURES
+- Will shortly add paradigm
