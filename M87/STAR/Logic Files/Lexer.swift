@@ -34,6 +34,7 @@ enum LexerError: Error {
 final class Lexer {
         func lexer(plaintext: String) throws -> [Token] {
             var i = 0
+            var line = 1
             var currentToken = ""
             var inQuotes = false
             var currentTokens: [Token] = []
@@ -48,6 +49,7 @@ final class Lexer {
                 case "+", "-", "*", "=", "/", "!", "==", "!=", ">", "<", ">=", "<=", "&&", "||", "->":
                     return Token(text: string, type: .op)
                 case "\n":
+                    line += 1
                     return Token(text: string, type: .newline)
                 case ",":
                     return Token(text: string, type: .comma)

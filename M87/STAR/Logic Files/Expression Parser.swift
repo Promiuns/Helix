@@ -1,4 +1,5 @@
 import Darwin
+internal import Combine
 indirect enum Node {
     case infix(op: Node, num1: Node, num2: Node?)
     case number(Double)
@@ -182,7 +183,7 @@ enum parenthesisDisambiguation: CustomStringConvertible {
     }
 }
 
-final class ExpressionParser {
+final class ExpressionParser: ObservableObject {
     let tokens: [Token]
     let lexer = Lexer()
     init(tokens: [Token] = []) {
@@ -323,6 +324,12 @@ final class ExpressionParser {
         }
         var numberStack: [Node] = []
         var operatorStack: [Node] = []
+        do {
+            print(temp)
+            print(try resolveCallOrCreateParentheses(temp))
+        } catch {
+            print("n")
+        }
         for element in try resolveCallOrCreateParentheses(temp) {
             switch element {
             case .create:
@@ -426,7 +433,7 @@ final class ExpressionParser {
                    case .leftParenthesis(.callParen) = nodes[i + 1] {
 
                     guard let end = try searchCorresponding(
-                        starter: [.leftParenthesis(.callParen)],
+                        starter: [.leftParenthesis(.callParen), .leftParenthesis(.groupParen)],
                         end: [.rightParenthesis],
                         tokens: nodes,
                         startingIndex: i + 1
@@ -502,6 +509,7 @@ final class ExpressionParser {
                     }
 
                     let inner = Array(nodes[(i + 1)..<end])
+                    print(inner)
                     let subtree = try parseNodePipeline(inner)
 
                     result.append(subtree)
@@ -766,7 +774,7 @@ final class ExpressionParser {
         }
     }
     
-    func lower(_ node: Node) throws -> Expression {
+    func lower(_ node: Node, index: Int) throws -> Expression {
         print(node)
         switch node {
 
@@ -780,13 +788,13 @@ final class ExpressionParser {
             return .boolean(b)
 
         case .id(let name):
-            return .variable(name)
+            return .variable(name, line: index)
         case .array(let nodes):
-            return .array(try nodes.map(lower))
+            return .array(try nodes.map { try lower($0, index: index) })
         case .function(let name, let args):
             return .call_function(
-                name: .variable(name),
-                arguments: try args.map(lower)
+                name: .variable(name, line: index),
+                arguments: try args.map { try lower($0, index: index) }, line: index
             )
         case .infix(op: .dot(.memberDot), num1: let base, num2: let member?):
             guard case .id(let memberName) = member else {
@@ -794,8 +802,8 @@ final class ExpressionParser {
             }
 
             return .dot(
-                structName: try lower(base),
-                member: memberName
+                structName: try lower(base, index: index),
+                member: memberName, line: index
             )
         case .infix(op: .dot(.numberDot), num1: let integer, num2: let decimal):
             guard let decimal = decimal, case .number(let int) = integer, case .number(let dec) = decimal else {
@@ -807,15 +815,15 @@ final class ExpressionParser {
             let mapped = try mapOperator(op)
             return .operation(
                 op: mapped,
-                val1: try lower(expr),
+                val1: try lower(expr, index: index),
                 val2: nil
             )
         case .infix(op: let op, num1: let lhs, num2: let rhs?):
             let mapped = try mapOperator(op)
             return .operation(
                 op: mapped,
-                val1: try lower(lhs),
-                val2: try lower(rhs)
+                val1: try lower(lhs, index: index),
+                val2: try lower(rhs, index: index)
             )
         default:
             throw ParserErrors.parserNotKnown

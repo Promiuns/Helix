@@ -1,12 +1,14 @@
+internal import Combine
+
 enum StatementError: Error {
     case temp
 }
 
-final class StatementParser {
+final class StatementParser: ObservableObject {
     let lexer = Lexer()
     let parser = ExpressionParser()
 
-    func statement_parse(paintext: String) throws -> [Statement] {
+    func statement_parse(paintext: String, starting_index: Int) throws -> [Statement] {
         let tokens = try lexer.lexer(plaintext: paintext)
         let lines = normalize(lines: tokens)
 
@@ -17,50 +19,53 @@ final class StatementParser {
             let line = lines[index]
             let keyword = line.first
             if keyword == Token(text: "return", type: .keyword) {
-                statements.append(try parseReturn(line: line))
+                statements.append(try parseReturn(line: line, index: index))
                 index += 1
                 continue
             }
             do {
+                print(line.map(\.text).joined(separator: " "))
                 let expression = try parser.parseExpression(expression: line.map(\.text).joined(separator: " "))
-                statements.append(.expr(try parser.lower(expression)))
+                statements.append(.expr(try parser.lower(expression, index: starting_index + index), line: starting_index + index))
                 index += 1
                 continue
             } catch { }
+            print(keyword as Any)
             switch keyword {
+                
             case nil:
                 throw StatementError.temp
                 
             case Token(text: "let", type: .keyword):
-                statements.append(try letDeclaration(line: line))
+                statements.append(try letDeclaration(line: line, index: starting_index + index))
                 index += 1
 
             case Token(text: "var", type: .keyword):
-                statements.append(try varDeclaration(line: line))
+                statements.append(try varDeclaration(line: line, index: starting_index + index))
                 index += 1
 
             case Token(text: "if", type: .keyword):
-                let parsed = try parseIf(line: line, body: lines, index: index)
+                let parsed = try parseIf(line: line, body: lines, index: starting_index + index)
                 statements.append(parsed.statement)
                 index += parsed.consumed
                 
             case Token(text: "while", type: .keyword):
-                let parsed = try parseWhile(line: line, body: lines, index: index)
+                let parsed = try parseWhile(line: line, body: lines, index: starting_index + index)
                 statements.append(parsed.statement)
                 index += parsed.consumed
                 
             case Token(text: "for", type: .keyword):
-                let parsed = try parseFor(line: line, body: lines, index: index)
+                let parsed = try parseFor(line: line, body: lines, index: starting_index + index)
                 statements.append(parsed.statement)
                 index += parsed.consumed
                 
             case Token(text: "fn", type: .keyword):
-                let parsed = try functionDeclaration(line: line, body: lines, index: index)
+                let parsed = try functionDeclaration(line: line, body: lines, index: starting_index + index)
                 statements.append(parsed.statement)
                 index += parsed.consumed
                 
             case _ where keyword!.type == .identifier:
-                let parsed = try assignment(line: line)
+                let parsed = try assignment(line: line, index: starting_index + index)
                 statements.append(parsed)
                 index += 1
 
@@ -87,7 +92,7 @@ final class StatementParser {
         
         let conditionSource = conditionTokens.map(\.text).joined(separator: " ")
         let conditionExpr = try parser.lower(
-            try parser.parseExpression(expression: conditionSource)
+            try parser.parseExpression(expression: conditionSource), index: index
         )
         
         // 2️⃣ Find IF opening brace line
@@ -99,7 +104,7 @@ final class StatementParser {
         let thenStatements = try statement_parse(
             paintext: ifBodyLines
                 .map { $0.map(\.text).joined(separator: " ") }
-                .joined(separator: "; ")
+                .joined(separator: "; "), starting_index: index + 1
         )
 
         // 4️⃣ Check ELSE
@@ -129,7 +134,7 @@ final class StatementParser {
             elseStatements = try statement_parse(
                 paintext: elseBodyLines
                     .map { $0.map(\.text).joined(separator: " ") }
-                    .joined(separator: "; ")
+                    .joined(separator: "; "), starting_index: elseBraceIndex
             )
 
             consumed = elseEnd - index + 1
@@ -139,7 +144,7 @@ final class StatementParser {
             statement: .ifStatement(
                 condition: conditionExpr,
                 then: thenStatements,
-                else: elseStatements
+                else: elseStatements, line: index
             ),
             consumed: consumed
         )
@@ -168,10 +173,10 @@ final class StatementParser {
         let expr = Array(line[1...(line.count - (try braceStarter() == index ? 2 : 1))])
         let delimiter = try correspondingBrace(index: try braceStarter(), body: body)
         let whileBody = Array(body[(try braceStarter()+1)..<delimiter])
-        let parsedWhile = try statement_parse(paintext: whileBody.map { $0.map(\.text).joined(separator: " ") }.joined(separator: "; "))
+        let parsedWhile = try statement_parse(paintext: whileBody.map { $0.map(\.text).joined(separator: " ") }.joined(separator: "; "), starting_index: index)
         print(expr.map(\.text).joined())
         let consumed = delimiter-index+1
-        return (statement: .whileStatement(condition: try parser.lower(try parser.parseExpression(expression: expr.map(\.text).joined(separator: " "))), body: parsedWhile), consumed: consumed)
+        return (statement: .whileStatement(condition: try parser.lower(try parser.parseExpression(expression: expr.map(\.text).joined(separator: " ")), index: index), body: parsedWhile, line: index), consumed: consumed)
         
     }
     
@@ -213,20 +218,20 @@ final class StatementParser {
         let delimiter = try correspondingBrace(index: try braceStarter(line, body, index), body: body)
         
         let forBody = Array(body[(try braceStarter(line, body, index)+1)..<delimiter])
-        let parsedFor = try statement_parse(paintext: forBody.map { $0.map(\.text).joined(separator: " ") }.joined(separator: "\n"))
-        let parsedValues = try splitByComma().map { try parser.lower(try parser.parseExpression(expression: $0)) }
+        let parsedFor = try statement_parse(paintext: forBody.map { $0.map(\.text).joined(separator: " ") }.joined(separator: "\n"), starting_index: index)
+        let parsedValues = try splitByComma().map { try parser.lower(try parser.parseExpression(expression: $0), index: index) }
         let consumed = delimiter-index+1
-        return (statement: .forStatement(iterators: bindingNames, iterends: parsedValues, body: parsedFor), consumed: consumed)
+        return (statement: .forStatement(iterators: bindingNames, iterends: parsedValues, body: parsedFor, line: index), consumed: consumed)
     }
 
     // MARK: - DECLARATIONS
     
-    func parseReturn(line: [Token]) throws -> Statement {
+    func parseReturn(line: [Token], index: Int) throws -> Statement {
         // return <expression>
         guard line.count >= 2 else {
             throw StatementError.temp
         }
-        let expression = try parser.lower(try parser.parseExpression(expression: line[1...].map(\.text).joined(separator: " ")))
+        let expression = try parser.lower(try parser.parseExpression(expression: line[1...].map(\.text).joined(separator: " ")), index: index)
         return .return_val(expression)
     }
     
@@ -310,12 +315,12 @@ final class StatementParser {
         }
         let delimiter = try correspondingBrace(index: try braceStarter(line, body, index), body: body)
         let functionBody = Array(body[(try braceStarter(line, body, index) + 1)..<delimiter])
-        let parsedFunction = try statement_parse(paintext: functionBody.map { $0.map(\.text).joined(separator: " ") }.joined(separator: "; "))
+        let parsedFunction = try statement_parse(paintext: functionBody.map { $0.map(\.text).joined(separator: " ") }.joined(separator: "; "), starting_index: index)
         let consumed = delimiter-index+1
-        return (statement: .functionDeclaration(name: id.text, paramNames: parameters.map(\.id), paramTypes: parameters.map(\.type), body: parsedFunction, returnType: parseType(typeString: returnType)), consumed: consumed)
+        return (statement: .functionDeclaration(name: id.text, paramNames: parameters.map(\.id), paramTypes: parameters.map(\.type), body: parsedFunction, returnType: parseType(typeString: returnType), line: index), consumed: consumed)
     }
 
-    func letDeclaration(line: [Token]) throws -> Statement {
+    func letDeclaration(line: [Token], index: Int) throws -> Statement {
         guard line.count >= 6 else {
             throw StatementError.temp
         }
@@ -332,13 +337,13 @@ final class StatementParser {
 
         return .createVariable(
             name: name,
-            value: try parser.lower(try parser.parseExpression(expression: expr)),
+            value: try parser.lower(try parser.parseExpression(expression: expr), index: index),
             bindingType: .let,
-            type: parseType(typeString: typeString)
+            type: parseType(typeString: typeString), line: index
         )
     }
 
-    func varDeclaration(line: [Token]) throws -> Statement {
+    func varDeclaration(line: [Token], index: Int) throws -> Statement {
         guard line.count >= 6 else { throw StatementError.temp }
         guard let colon = line.firstIndex(of: Token(text: ":", type: .colon)), colon == 2 else {
             throw StatementError.temp
@@ -353,26 +358,26 @@ final class StatementParser {
 
         return .createVariable(
             name: name,
-            value: try parser.lower(try parser.parseExpression(expression: expr)),
+            value: try parser.lower(try parser.parseExpression(expression: expr), index: index),
             bindingType: .var,
-            type: parseType(typeString: typeString)
+            type: parseType(typeString: typeString), line: index
         )
     }
     
-    func assignment(line: [Token]) throws -> Statement {
+    func assignment(line: [Token], index: Int) throws -> Statement {
         guard line.count >= 3 else {
             throw StatementError.temp
         }
         guard let split = line.firstIndex(of: Token(text: "=", type: .op)) else {
             throw StatementError.temp
         }
-        let id = try parser.lower(try parser.parseExpression(expression: line[..<split].map(\.text).joined(separator: " ")))
-        guard case .variable(let string) = id else {
+        let id = try parser.lower(try parser.parseExpression(expression: line[..<split].map(\.text).joined(separator: " ")), index: index)
+        guard case .variable(let string, _) = id else {
             throw StatementError.temp
         }
         
-        let expr = try parser.lower(try parser.parseExpression(expression: line[(split+1)...].map(\.text).joined()))
-        return .modifyVariable(name: string, newValue: expr)
+        let expr = try parser.lower(try parser.parseExpression(expression: line[(split+1)...].map(\.text).joined()), index: index)
+        return .modifyVariable(name: string, newValue: expr, line: index)
     }
 
     // MARK: - UTILITIES

@@ -1,17 +1,30 @@
 import Foundation
 internal import Combine
 
+var executionStepCount = 0
+let MAX_EXECUTION_STEPS = 100_000
+
+func stepCheck() throws {
+    executionStepCount += 1
+    if executionStepCount > MAX_EXECUTION_STEPS {
+        throw ErrorInformation(
+            error: .generalError("Execution limit exceeded (possible infinite loop)"),
+            line: -1
+        )
+    }
+}
+
 indirect enum Expression {
     case operation(op: Operators, val1: Expression, val2: Expression? = nil) // useful for unary operations; combining binary operations and unary operations
-    case variable(String)
+    case variable(String, line: Int)
     case number(Double)
     case string(String)
     case boolean(Bool)
     case null(`Type`)
     case array([Expression])
     case structure(name: String)
-    case call_function(name: Expression, arguments: [Expression])
-    case dot(structName: Expression, member: String)
+    case call_function(name: Expression, arguments: [Expression], line: Int)
+    case dot(structName: Expression, member: String, line: Int)
     case accessElement(arr: Expression, elementIndex: Expression)
     case convertToType(expr: Expression, toType: Type)
 }
@@ -21,27 +34,28 @@ enum FunctionValue {
     case builtinPrint
     case builtinCount
     case builtinRound
+    case builtinAppend
 }
 
 enum Statement {
     case printTest
     // creation shenanigans
-    case createVariable(name: String, value: Expression, bindingType: BindingType, type: `Type`)
-    case modifyVariable(name: String, newValue: Expression)
-    case createStruct(name: String, fields: [String: VariableBinding])
-    case copyStruct(copiedName: String, from: String, add: [String: VariableBinding], delete: [String], modify: [String: VariableBinding]) // the new COP stuff
-    case modifyMember(name: String, from: Expression, withNewValue: Expression)
-    case functionDeclaration(name: String, paramNames: [String], paramTypes: [Type], body: [Statement], returnType: Type)
-    case modifyElement(array: Expression, index: Expression, withNewValue: Expression)
+    case createVariable(name: String, value: Expression, bindingType: BindingType, type: `Type`, line: Int)
+    case modifyVariable(name: String, newValue: Expression, line: Int)
+    case createStruct(name: String, fields: [String: VariableBinding], line: Int)
+    case copyStruct(copiedName: String, from: String, add: [String: VariableBinding], delete: [String], modify: [String: VariableBinding], line: Int) // the new COP stuff
+    case modifyMember(name: String, from: Expression, withNewValue: Expression, line: Int)
+    case functionDeclaration(name: String, paramNames: [String], paramTypes: [Type], body: [Statement], returnType: Type, line: Int)
+    case modifyElement(array: Expression, index: Expression, withNewValue: Expression, line: Int)
     
     // control flow
-    case ifStatement(condition: Expression, then: [Statement], else: [Statement]?)
-    case whileStatement(condition: Expression, body: [Statement])
-    case forStatement(iterators: [String], iterends: [Expression], body: [Statement])
+    case ifStatement(condition: Expression, then: [Statement], else: [Statement]?, line: Int)
+    case whileStatement(condition: Expression, body: [Statement], line: Int)
+    case forStatement(iterators: [String], iterends: [Expression], body: [Statement], line: Int)
     case return_val(Expression)
     
     // miscellaneous
-    case expr(Expression)
+    case expr(Expression, line: Int)
 }
 
 enum Operators {
@@ -195,6 +209,12 @@ enum ErrorBubbles: Error {
     case notDefined
     case breakOutAll
     case generalError(String)
+    case uninitializedError
+}
+
+struct ErrorInformation: Error {
+    let error: ErrorBubbles
+    let line: Int
 }
 
 final class Scope {
@@ -215,19 +235,19 @@ final class Scope {
         throw ErrorBubbles.notDefined
     }
     
-    func modifyVariable(name: String, withNewValue: Value) throws {
+    func modifyVariable(name: String, withNewValue: Value, index: Int) throws {
         let (scope, variable) = try getVariable(name: name)
         guard canAssign(lhsType: variable.type, rhsType: try withNewValue.type()) else {
-            throw ErrorBubbles.typeMismatch
+            throw ErrorInformation(error: .typeMismatch, line: index)
         }
         scope.variables[name] = VariableBinding(value: .initialized(withNewValue), bindType: variable.bindType, type: variable.type)
     }
     
-    func addVariable(name: String, value: VariableBinding) throws {
+    func addVariable(name: String, value: VariableBinding, index: Int) throws {
         if case ValueType.initialized(let v) = value.value {
             if value.type != (try v.type()) {
                 guard case .optional(let t) = value.type, t == (try v.type()) else {
-                    throw ErrorBubbles.typeMismatch
+                    throw ErrorInformation(error: .typeMismatch, line: index)
                 }
             }
         }
@@ -245,6 +265,7 @@ final class Scope {
 
 @discardableResult
 func evaluate(expression: Expression, scope: Scope, output: Output) throws -> Value {
+    try stepCheck()
     switch expression {
     case .operation(let op, let val1, let val2): // very long, yes, but needed for all core operations
         switch op {
@@ -366,10 +387,11 @@ func evaluate(expression: Expression, scope: Scope, output: Output) throws -> Va
             }
                 return .array((Int(d1)...Int(d2)).map { .number(Double($0)) }, elementType: .number)
         }
-    case .variable(let name):
+    case .variable(let name, line: let line):
         guard case ValueType.initialized(let v) = try scope.getVariable(name: name).1.value else {
-            throw ErrorBubbles.uninitializedValue
+            throw ErrorInformation(error: .uninitializedValue, line: line)
         }
+        print("afafsfasfsa: ", v)
         return v
     case .number(let num):
         return .number(num)
@@ -398,18 +420,20 @@ func evaluate(expression: Expression, scope: Scope, output: Output) throws -> Va
             throw ErrorBubbles.typeMismatch
         }
         return .structure(structure)
-    case .call_function(name: let callee, arguments: let arguments):
+    case .call_function(name: let callee, arguments: let arguments, line: let line):
         let calleeValue = try evaluate(expression: callee, scope: scope, output: output)
         guard case .function(let fn) = calleeValue else {
             throw ErrorBubbles.typeMismatch
         }
         switch fn {
         case .builtinPrint:
+            var joined = ""
             for argument in arguments {
                 let argValue = try evaluate(expression: argument, scope: scope, output: output)
-                print(argValue)
-                output.terminaltext.append(argValue.desc())
+                print("ans: ", argValue)
+                joined += argValue.desc()
             }
+            output.terminaltext.append(joined)
             return .void
             
         case .builtinCount:
@@ -437,7 +461,7 @@ func evaluate(expression: Expression, scope: Scope, output: Output) throws -> Va
                 let ans = try evaluate(expression: value, scope: scope, output: output)
                 try functionScope.addVariable(
                     name: key,
-                    value: VariableBinding(value: .initialized(ans), bindType: .let, type: type)
+                    value: VariableBinding(value: .initialized(ans), bindType: .let, type: type), index: line
                 )
             }
             for ln in name.body {
@@ -459,11 +483,34 @@ func evaluate(expression: Expression, scope: Scope, output: Output) throws -> Va
             }
             return .number(round(double))
 
+        case .builtinAppend:
+            // append(arr, elem)
+            guard arguments.count == 2 else {
+                throw ErrorBubbles.argumentCountMismatch
+            }
+            guard case .variable(let string, _) = arguments[0] else {
+                throw ErrorBubbles.typeMismatch
+            }
+            let info = try scope.getVariable(name: string)
+            guard info.1.bindType == .var else {
+                throw ErrorBubbles.mutatedLet
+            }
+            guard case .initialized(let val) = info.1.value, case .array(let array, let elementType) = val else {
+                throw ErrorBubbles.typeMismatch
+            }
+            let elem = try evaluate(expression: arguments[1], scope: scope, output: output)
+            guard try elem.type() == elementType else {
+                throw ErrorBubbles.typeMismatch
+            }
+            var temp = array
+            temp.append(elem)
+            try (info.0).modifyVariable(name: string, withNewValue: .array(temp, elementType: elementType), index: line)
+            return .void
         }
-    case .dot(structName: let structName, member: let member):
+    case .dot(structName: let structName, member: let member, line: let line):
         let targetVal = try evaluate(expression: structName, scope: scope, output: output)
         guard case .structure(let structData) = targetVal else {
-            throw ErrorBubbles.typeMismatch
+            throw ErrorInformation(error: .typeMismatch, line: line)
         }
         guard let binding = structData.fieldMembers[member],
               case .initialized(let value) = binding.value else {
@@ -563,26 +610,27 @@ func fancy(number: Double) -> String {
 }
 
 func execute(statement: Statement, scope: Scope, output: Output) throws {
+    try stepCheck()
     switch statement {
-    case .createVariable(name: let name, value: let value, bindingType: let bindingType, type: let type):
+    case .createVariable(name: let name, value: let value, bindingType: let bindingType, type: let type, line: let line):
         let result = try evaluate(expression: value, scope: scope, output: output)
         switch type {
         case .structure(let structName):
             guard case .initialized(let value) = try scope.getVariable(name: structName).1.value, case .structure(let structure) = value else {
-                throw ErrorBubbles.typeMismatch
+                throw ErrorInformation(error: .typeMismatch, line: line)
             }
-            try scope.addVariable(name: name, value: VariableBinding(value: .initialized(.structure(StructData(name: name, fieldMembers: structure.fieldMembers, historyTree: structure.historyTree, templateCase: .rebindable))), bindType: bindingType, type: .structure(name)))
+            try scope.addVariable(name: name, value: VariableBinding(value: .initialized(.structure(StructData(name: name, fieldMembers: structure.fieldMembers, historyTree: structure.historyTree, templateCase: .rebindable))), bindType: bindingType, type: .structure(name)), index: line)
         default:
-            try scope.addVariable(name: name, value: VariableBinding(value: ValueType.initialized(result), bindType: bindingType, type: type))
+            try scope.addVariable(name: name, value: VariableBinding(value: ValueType.initialized(result), bindType: bindingType, type: type), index: line)
         }
-    case .modifyVariable(name: let name, newValue: let newExpression):
+    case .modifyVariable(name: let name, newValue: let newExpression, line: let line):
         let newValue = try evaluate(expression: newExpression, scope: scope, output: output)
         let info = try scope.getVariable(name: name)
         guard info.1.bindType == .var else {
-            throw ErrorBubbles.mutatedLet
+            throw ErrorInformation(error: .mutatedLet, line: line)
         }
-        try scope.modifyVariable(name: name, withNewValue: newValue)
-    case .ifStatement(condition: let condition, then: let then, else: let `else`):
+        try scope.modifyVariable(name: name, withNewValue: newValue, index: line)
+    case .ifStatement(condition: let condition, then: let then, else: let `else`, _):
         let result = try evaluate(expression: condition, scope: scope, output: output)
         guard case .bool(let bool) = result else {
             throw ErrorBubbles.typeMismatch
@@ -600,7 +648,7 @@ func execute(statement: Statement, scope: Scope, output: Output) throws {
         }
     case .printTest: // testing node
         print("EXECUTED NODE: ", statement)
-    case .whileStatement(condition: let condition, body: let body):
+    case .whileStatement(condition: let condition, body: let body, line: _):
         let whileScope = Scope(parent: scope)
         while true {
             let bool = try evaluate(expression: condition, scope: whileScope, output: output)
@@ -614,59 +662,90 @@ func execute(statement: Statement, scope: Scope, output: Output) throws {
                 try execute(statement: ln, scope: whileScope, output: output)
             }
         }
-    case .forStatement(iterators: let iterators, iterends: let iterends, body: let body):
+    case .forStatement(iterators: let iterators, iterends: let iterends, body: let body, line: let line):
+
         guard iterators.count == iterends.count else {
             throw ErrorBubbles.argumentCountMismatch
         }
-        for index in 0..<iterators.count {
-            let ans = try evaluate(expression: iterends[index], scope: scope, output: output)
-            try scope.addVariable(name: iterators[index], value: VariableBinding(value: .uninitialized, bindType: .var, type: innerType(type: try ans.type())))
+
+        // 1️⃣ Evaluate iterends ONCE
+        let evaluatedIterends: [Value] = try iterends.map {
+            try evaluate(expression: $0, scope: scope, output: output)
         }
+        print(evaluatedIterends)
         let forScope = Scope(parent: scope)
+        // 2️⃣ Create iterator variables
+        for index in 0..<iterators.count {
+            try forScope.addVariable(
+                name: iterators[index],
+                value: VariableBinding(
+                    value: .uninitialized,
+                    bindType: .var,
+                    type: innerType(type: try evaluatedIterends[index].type())
+                ),
+                index: line
+            )
+        }
+
+        
         var idx = 0
+
         while true {
-            do {
-                /*
-                 note: iterends are the rhs of a for-in/for-each statement; i.e. for i in 1...5, the iterend is 1...5
-                 we can have for x, y in "abc", [1, 2, 3]
-                 so iterend is an array of Expression, which itself can have an array
-                 */
-                for index in 0..<iterators.count {
-                    let name = iterators[index]
-                    let ans = try evaluate(expression: iterends[index], scope: scope, output: output)
-                    
-                    switch ans {
-                        // for statements only allow strings and arrays; a...b is just [a, a+1, a+2, ..., b] assuming a and b are numbers
-                    case .string(let str):
-                        guard idx < str.count else {
-                            throw ErrorBubbles.breakOutAll
-                        }
-                        try scope.modifyVariable(name: name, withNewValue: .string(String(str[str.index(str.startIndex, offsetBy: idx)])))
-                    case .array(let arr, elementType: _):
-                        guard idx < arr.count else {
-                            throw ErrorBubbles.breakOutAll
-                        }
-                        try scope.modifyVariable(name: name, withNewValue: arr[idx])
-                    default:
-                        throw ErrorBubbles.typeMismatch
+            var reachedEnd = false
+            print(idx)
+            // 3️⃣ Bind iterator values
+            for index in 0..<iterators.count {
+                let iterName = iterators[index]
+                let iterValue = evaluatedIterends[index]
+
+                switch iterValue {
+                case .array(let arr, _):
+                    if idx >= arr.count {
+                        reachedEnd = true
+                    } else {
+                        print(arr[idx])
+                        try forScope.modifyVariable(
+                            name: iterName,
+                            withNewValue: arr[idx],
+                            index: line)
                     }
+
+                case .string(let str):
+                    if idx >= str.count {
+                        reachedEnd = true
+                    } else {
+                        let ch = String(str[str.index(str.startIndex, offsetBy: idx)])
+                        try forScope.modifyVariable(
+                            name: iterName,
+                            withNewValue: .string(ch),
+                            index: line
+                        )
+                    }
+
+                default:
+                    throw ErrorBubbles.typeMismatch
                 }
-            } catch ErrorBubbles.breakOutAll {
-                break
+
+                if reachedEnd { break }
             }
-            for ln in body {
-                try execute(statement: ln, scope: forScope, output: output)
+
+            if reachedEnd { break }
+            print("scope: ", forScope.variables)
+            for stmt in body {
+                try execute(statement: stmt, scope: forScope, output: output)
             }
+
             idx += 1
         }
-    case .createStruct(name: let name, fields: let fields):
-        try scope.addVariable(name: name, value: VariableBinding(value: .initialized(.structure(StructData(name: name, fieldMembers: fields, historyTree: [], templateCase: .template))), bindType: .var, type: .structure(name)))
-    case .copyStruct(copiedName: let copiedName, from: let from, add: let add, delete: let delete, modify: let modify):
+    case .createStruct(name: let name, fields: let fields, line: let line):
+        try scope.addVariable(name: name, value: VariableBinding(value: .initialized(.structure(StructData(name: name, fieldMembers: fields, historyTree: [], templateCase: .template))), bindType: .var, type: .structure(name)), index: line)
+    case .copyStruct(copiedName: let copiedName, from: let from, add: let add, delete: let delete, modify: let modify, line: let line):
         let result = try scope.getVariable(name: from).1
         guard case .initialized(let value) = result.value, case .structure(let s) = value else {
             throw ErrorBubbles.typeMismatch
         }
         var temporaryStruct = s
+        
         temporaryStruct.name = copiedName
         guard temporaryStruct.templateCase == .template else { // it doesn't make sense if you can do copy fooVariable => Bstruct {
             throw ErrorBubbles.typeMismatch
@@ -689,15 +768,15 @@ func execute(statement: Statement, scope: Scope, output: Output) throws {
                 throw ErrorBubbles.notDefined
             }
         }
-        try scope.addVariable(name: copiedName, value: VariableBinding(value: .initialized(.structure(temporaryStruct)), bindType: .var, type: .structure(copiedName)))
-    case .functionDeclaration(name: let name, paramNames: let paramNames, paramTypes: let paramTypes, body: let body, returnType: let returnType):
-        try scope.addVariable(name: name, value: VariableBinding(value: .initialized(.function(.user(FunctionData(body: body, argName: paramNames, argType: paramTypes, returnType: returnType)))), bindType: .let, type: .function))
+        try scope.addVariable(name: copiedName, value: VariableBinding(value: .initialized(.structure(temporaryStruct)), bindType: .var, type: .structure(copiedName)), index: line)
+    case .functionDeclaration(name: let name, paramNames: let paramNames, paramTypes: let paramTypes, body: let body, returnType: let returnType, line: let line):
+        try scope.addVariable(name: name, value: VariableBinding(value: .initialized(.function(.user(FunctionData(body: body, argName: paramNames, argType: paramTypes, returnType: returnType)))), bindType: .let, type: .function), index: line)
     case .return_val(let expr):
         throw ErrorBubbles.returned(try evaluate(expression: expr, scope: scope, output: output))
-    case .expr(let expr):
-        _ = try evaluate(expression: expr, scope: scope, output: output)
-    case .modifyMember(name: let memberName, from: let from, withNewValue: let newVal):
-        guard case .variable(let string) = from else {
+    case .expr(let expr, line: _):
+        try evaluate(expression: expr, scope: scope, output: output)
+    case .modifyMember(name: let memberName, from: let from, withNewValue: let newVal, line: let line):
+        guard case .variable(let string, _) = from else {
             throw ErrorBubbles.notDefined
         }
         let (structScope, binding) = try scope.getVariable(name: string)
@@ -719,9 +798,9 @@ func execute(statement: Statement, scope: Scope, output: Output) throws {
             throw ErrorBubbles.typeMismatch
         }
         modifiedField[memberName] = VariableBinding(value: .initialized(try evaluate(expression: newVal, scope: scope, output: output)), bindType: .var, type: `struct`.fieldMembers[memberName]!.type)
-        try structScope.modifyVariable(name: string, withNewValue: .structure(StructData(name: string, fieldMembers: modifiedField, historyTree: `struct`.historyTree, templateCase: .rebindable)))
-    case .modifyElement(array: let array, index: let i, withNewValue: let withNewValue):
-        guard case .variable(let string) = array else {
+        try structScope.modifyVariable(name: string, withNewValue: .structure(StructData(name: string, fieldMembers: modifiedField, historyTree: `struct`.historyTree, templateCase: .rebindable)), index: line)
+    case .modifyElement(array: let array, index: let i, withNewValue: let withNewValue, line: let line):
+        guard case .variable(let string, _) = array else {
             throw ErrorBubbles.typeMismatch
         }
         let ans = try evaluate(expression: i, scope: scope, output: output)
@@ -745,7 +824,7 @@ func execute(statement: Statement, scope: Scope, output: Output) throws {
             guard let first = tmp.first else {
                 throw ErrorBubbles.typeMismatch
             }
-            try scope.modifyVariable(name: string, withNewValue: .array(tmp, elementType: try first.type()))
+            try scope.modifyVariable(name: string, withNewValue: .array(tmp, elementType: try first.type()), index: line)
         case .string(let str):
             guard case .string(let string) = try evaluate(expression: withNewValue, scope: scope, output: output) else {
                 throw ErrorBubbles.typeMismatch
@@ -763,9 +842,9 @@ func execute(statement: Statement, scope: Scope, output: Output) throws {
             guard let first = toValue.first else {
                 throw ErrorBubbles.typeMismatch
             }
-            try scope.modifyVariable(name: string, withNewValue: .array(toValue, elementType: try first.type()))
+            try scope.modifyVariable(name: string, withNewValue: .array(toValue, elementType: try first.type()), index: line)
         default:
-            throw ErrorBubbles.typeMismatch
+            throw ErrorInformation(error: .mutatedNonBindable, line: -999)
         }
     }
 }
@@ -797,24 +876,61 @@ func innerType(type: Type) -> Type {
     }
 }
 
-class ProgramRunner {
+class ProgramRunner: ObservableObject {
     let scope = Scope()
     let output = Output()
     var program: [Statement]
+
     init(program: [Statement]) {
         self.program = program
     }
-    func test() {
-        try? scope.addVariable(name: "print", value: VariableBinding(value: .initialized(.function(.builtinPrint)), bindType: .let, type: .function))
-        try? scope.addVariable(name: "length", value: VariableBinding(value: .initialized(.function(.builtinCount)), bindType: .let, type: .function))
-        try? scope.addVariable(name: "round", value: VariableBinding(value: .initialized(.function(.builtinRound)), bindType: .let, type: .function))
-        for ln in program {
-            do {
-                try execute(statement: ln, scope: scope, output: output)
-            } catch let err {
-                print(err)
-                break
-            }
+
+    @MainActor
+    func run() throws {
+        executionStepCount = 0
+
+        try scope.addVariable(
+            name: "print",
+            value: VariableBinding(
+                value: .initialized(.function(.builtinPrint)),
+                bindType: .let,
+                type: .function
+            ),
+            index: 0
+        )
+
+        try scope.addVariable(
+            name: "length",
+            value: VariableBinding(
+                value: .initialized(.function(.builtinCount)),
+                bindType: .let,
+                type: .function
+            ),
+            index: 0
+        )
+
+        try scope.addVariable(
+            name: "round",
+            value: VariableBinding(
+                value: .initialized(.function(.builtinRound)),
+                bindType: .let,
+                type: .function
+            ),
+            index: 0
+        )
+
+        try scope.addVariable(
+            name: "append",
+            value: VariableBinding(
+                value: .initialized(.function(.builtinAppend)),
+                bindType: .let,
+                type: .function
+            ),
+            index: 0
+        )
+
+        for stmt in program {
+            try execute(statement: stmt, scope: scope, output: output)
         }
     }
 }

@@ -1,4 +1,6 @@
 import SwiftUI
+internal import Combine
+import RegexBuilder
 
 func RGB(_ r: Double = 0, _ g: Double = 0, _ b: Double = 0, _ a: Double = 1, rand: Bool = false) -> Color {
     if rand {
@@ -8,22 +10,188 @@ func RGB(_ r: Double = 0, _ g: Double = 0, _ b: Double = 0, _ a: Double = 1, ran
     }
 }
 
-struct CodeEditor: View {
-    @ObservedObject var text: ProgramText
-    var body: some View {
-        TextEditor(text: $text.programText)
-            .font(.system(size: 15, design: .monospaced))
-            .disableAutocorrection(true)
+extension Color {
+    static func invertedScheme(for colorScheme: ColorScheme) -> Color {
+        return colorScheme == .dark ? .white : .black
+    }
+    
+    static func scheme(for colorScheme: ColorScheme) -> Color {
+        return colorScheme == .dark ? .black : .white
     }
 }
 
-struct Terminal: View {
-    @ObservedObject var output: Output
+struct BorderedTextEditor<Content: View>: View {
+    @Binding var text: AttributedString
+    @State var viewWidth: CGFloat = 0
+    @State var viewHeight: CGFloat = 0
+    let padding: CGFloat?
+    let borderSize: CGFloat
+    @ViewBuilder var content: () -> Content
+
     var body: some View {
-        TextEditor(text: .constant(output.terminaltext.joined(separator: "\n")))
-            .font(.system(size: 15, design: .monospaced))
-            .disableAutocorrection(true)
-            .disabled(true)
+        ZStack {
+            content()
+                .padding(padding ?? 0)
+                .allowsHitTesting(false)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear() {
+                                let size = geo.size
+                                if size.width.isFinite && size.height.isFinite {
+                                    viewWidth = size.width
+                                    viewHeight = size.height
+                                }
+                            }
+                            .onChange(of: geo.size) {
+                                let size = geo.size
+                                if size.width.isFinite && size.height.isFinite {
+                                    viewWidth = size.width
+                                    viewHeight = size.height
+                                }
+                            }
+                    }
+                    .allowsHitTesting(false)
+                )
+
+            let safeWidth = max(0, (viewWidth.isFinite ? viewWidth : 0) - (borderSize + (padding ?? 0)) / 2)
+            let safeHeight = max(0, (viewHeight.isFinite ? viewHeight : 0) - (borderSize + (padding ?? 0)) / 2)
+
+            TextEditor(text: $text)
+                .padding(padding ?? 0)
+                .font(.system(size: 15, design: .monospaced))
+                .disableAutocorrection(true)
+                .scrollContentBackground(.hidden)
+                .frame(width: safeWidth, height: safeHeight)
+                // Trigger highlighting whenever text changes
+                .onChange(of: text) { _, newValue in
+                    applySyntaxHighlighting()
+                }
+        }
+    }
+
+    private func applySyntaxHighlighting() {
+        let plainText = String(text.characters)
+        var updated = AttributedString(plainText)
+        
+        // 1. Reset default style
+        updated.foregroundColor = .primary
+        updated.font = .system(size: 15, design: .monospaced)
+
+        // 2. Highlight Strings: green (Process these first so keywords inside quotes aren't pink)
+        // Pattern: Matches anything between double quotes, including escaped quotes \"
+        let stringPattern = /"[^"\\]*(?:\\.[^"\\]*)*"/
+        for match in plainText.ranges(of: stringPattern) {
+            if let attributedRange = Range(match, in: updated) {
+                updated[attributedRange].foregroundColor = RGB(111, 171, 113)
+                updated[attributedRange].font = .system(size: 15, weight: .semibold, design: .monospaced)
+            }
+        }
+        
+        // 2b. Highlight Numbers (not inside identifiers): cyan-ish
+        // Supports optional leading sign and optional fractional part.
+        let numberPattern = Regex {
+            Anchor.wordBoundary
+            Optionally { ChoiceOf { "+"; "-" } }
+            OneOrMore(.digit)
+            Optionally {
+                "."
+                OneOrMore(.digit)
+            }
+            Anchor.wordBoundary
+        }
+        for match in plainText.ranges(of: numberPattern) {
+            if let attributedRange = Range(match, in: updated) {
+                // Avoid recoloring numbers inside quoted strings (already green)
+                if updated[attributedRange].foregroundColor != RGB(111, 171, 113) {
+                    updated[attributedRange].foregroundColor = RGB(88, 200, 230)
+                    updated[attributedRange].font = .system(size: 15, design: .monospaced)
+                }
+            }
+        }
+
+        // 3. Highlight Keywords: bold and pink
+        let keywords = [
+            "var", "if", "for", "while", "struct", "copy", "let", "else", "create", "in", "fn", "return"
+        ]
+        let types = [
+            "number", "string", "boolean", "void", "array", "optional"
+        ]
+        let builtinFunctions = [
+            "print", "length", "append", "round"
+        ]
+        let bools = [
+            "true", "false"
+        ]
+        for keyword in keywords {
+            // use a Regex for word boundaries so "variable" doesn't highlight the "var" part
+            let keywordPattern = Regex { Anchor.wordBoundary; keyword; Anchor.wordBoundary }
+            
+            for match in plainText.ranges(of: keywordPattern) {
+                if let attributedRange = Range(match, in: updated) {
+                    // only color pink if it hasn't already been colored green (as a string)
+                    if updated[attributedRange].foregroundColor != RGB(111, 171, 113) {
+                        updated[attributedRange].foregroundColor = .pink
+                        updated[attributedRange].font = .system(size: 15, weight: .heavy, design: .monospaced)
+                    }
+                }
+            }
+        }
+        
+        for type in types {
+            let keywordPattern = Regex { Anchor.wordBoundary; type; Anchor.wordBoundary }
+            
+            for match in plainText.ranges(of: keywordPattern) {
+                if let attributedRange = Range(match, in: updated) {
+                    // now attribute if its a type
+                    if updated[attributedRange].foregroundColor != RGB(111, 171, 113) {
+                        updated[attributedRange].foregroundColor = .blue
+                        updated[attributedRange].font = .system(size: 15, weight: .bold, design: .monospaced)
+                    }
+                }
+            }
+        }
+        
+        for builtinFunction in builtinFunctions {
+            let keywordPattern = Regex { Anchor.wordBoundary; builtinFunction; Anchor.wordBoundary }
+            
+            for match in plainText.ranges(of: keywordPattern) {
+                if let attributedRange = Range(match, in: updated) {
+                    // now attribute if its a builtin
+                    if updated[attributedRange].foregroundColor != RGB(111, 171, 113) {
+                        updated[attributedRange].foregroundColor = RGB(166, 68, 227)
+                        updated[attributedRange].font = .system(size: 15, design: .monospaced)
+                    }
+                }
+            }
+        }
+        
+        for bool in bools {
+            let keywordPattern = Regex { Anchor.wordBoundary; bool; Anchor.wordBoundary }
+            
+            for match in plainText.ranges(of: keywordPattern) {
+                if let attributedRange = Range(match, in: updated) {
+                    // now attribute if its a builtin
+                    if updated[attributedRange].foregroundColor != RGB(111, 171, 113) {
+                        updated[attributedRange].foregroundColor = RGB(232, 100, 223)
+                        updated[attributedRange].font = .system(size: 15, design: .monospaced)
+                    }
+                }
+            }
+        }
+        
+        if text != updated {
+            text = updated
+        }
+    }
+}
+
+
+struct Terminal<Content: View>: View {
+    @ObservedObject var output: Output
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        BorderedTextEditor(text: .constant(AttributedString(output.terminaltext.joined(separator: "\n"))), padding: 0, borderSize: 40, content: { content() })
     }
 }
 
@@ -32,12 +200,10 @@ struct NotchHandle: View {
     var body: some View {
         Capsule()
             .fill(.ultraThinMaterial)
-            .fill(hovering
-                  ? RGB(80, 115, 133).opacity(0.25)
-                  : Color.clear)
+            .foregroundStyle(.primary)
             .overlay(
                 Capsule()
-                    .stroke(.white.opacity(0.35), lineWidth: 1)
+                    .stroke(.secondary.opacity(0.6), lineWidth: 1)
             )
     }
 }
@@ -95,7 +261,10 @@ struct Combined: View {
     @ObservedObject var out: Output
     @ObservedObject var programText: ProgramText
     @ObservedObject var didRun: RunProgram
+    @Environment(\.colorScheme) var colorScheme
     @State var hovering: (Bool, Bool, Bool, Bool, Bool, Bool) = (false, false, false, false, false, false)
+    // Local attributed editor state, initialized from ProgramText.programText (String)
+    @State private var attributedText: AttributedString = ""
 
     var body: some View {
         VStack {
@@ -104,8 +273,8 @@ struct Combined: View {
             HStack {
                 Pushback(maxWidth: 330, maxHeight: 224) {
                     HStack(spacing: 20) {
-                        HoverBar(width: (130, 130), height: (180, 40), content: {
-                            VStack(spacing: 20) {
+                        HoverBar(width: (130, 130), height: (225, 40), content: {
+                            VStack(spacing: 7) {
                                 Button {
                                     didRun.didRun = true
                                 } label: {
@@ -119,10 +288,18 @@ struct Combined: View {
                                     }
                                     .scaleEffect(CGSize(width: hovering.0 ? 1.2 : 1, height: hovering.0 ? 1.2 : 1))
                                     
+                                    
                                 }
                                 .buttonStyle(.plain)
                                 .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.0)
                                 .onHover { hovering.0 = $0 }
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 35)
+                                        .stroke(Color.invertedScheme(for: colorScheme).opacity(0.7), lineWidth: 1)
+                                        .scaleEffect(hovering.0 ? CGSize(width: 1.2, height: 1.2) : CGSize(width: 1, height: 1))
+                                        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.0)
+                                )
+                                Text("Run Code")
                                 Button {
                                     //
                                 } label: {
@@ -141,6 +318,13 @@ struct Combined: View {
                                 .buttonStyle(.plain)
                                 .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.1)
                                 .onHover { hovering.1 = $0 }
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 35)
+                                        .stroke(Color.invertedScheme(for: colorScheme).opacity(0.7), lineWidth: 1)
+                                        .scaleEffect(hovering.1 ? CGSize(width: 1.2, height: 1.2) : CGSize(width: 1, height: 1))
+                                        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.1)
+                                )
+                                Text("Step Code")
                                 Button {
                                     //
                                 } label: {
@@ -157,6 +341,13 @@ struct Combined: View {
                                 .buttonStyle(.plain)
                                 .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.2)
                                 .onHover { hovering.2 = $0 }
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 35)
+                                        .stroke(Color.invertedScheme(for: colorScheme).opacity(0.7), lineWidth: 1)
+                                        .scaleEffect(hovering.2 ? CGSize(width: 1.2, height: 1.2) : CGSize(width: 1, height: 1))
+                                        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.2)
+                                )
+                                Text("Stop Code")
                             }
                         }, label: "Execution")
                         
@@ -179,6 +370,12 @@ struct Combined: View {
                                     .buttonStyle(.plain)
                                     .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.3)
                                     .onHover { hovering.3 = $0 }
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 35)
+                                            .stroke(Color.invertedScheme(for: colorScheme).opacity(0.7), lineWidth: 1)
+                                            .scaleEffect(hovering.3 ? CGSize(width: 1.2, height: 1.2) : CGSize(width: 1, height: 1))
+                                            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.3)
+                                    )
                                     Text("The Codex")
                                 }
                                 
@@ -195,10 +392,17 @@ struct Combined: View {
                                                 .scaleEffect(CGSize(width: 1.5, height: 1.5))
                                         }
                                     })
-                                    .scaleEffect(hovering.4 ? CGSize(width: 1.2, height: 1.2) : CGSize(width: 1, height: 1))
                                     .buttonStyle(.plain)
+                                    .scaleEffect(hovering.4 ? CGSize(width: 1.2, height: 1.2) : CGSize(width: 1, height: 1))
                                     .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.4)
                                     .onHover { hovering.4 = $0 }
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 35)
+                                            .stroke(Color.invertedScheme(for: colorScheme).opacity(0.7), lineWidth: 1)
+                                            .scaleEffect(hovering.4 ? CGSize(width: 1.2, height: 1.2) : CGSize(width: 1, height: 1))
+                                            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.4)
+                                    )
+                                    
                                     Text("Programming Languages")
                                         .font(.system(size: 9))
                                 }
@@ -220,6 +424,12 @@ struct Combined: View {
                                     .buttonStyle(.plain)
                                     .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.5)
                                     .onHover { hovering.5 = $0 }
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 35)
+                                            .stroke(Color.invertedScheme(for: colorScheme).opacity(0.7), lineWidth: 1)
+                                            .scaleEffect(hovering.5 ? CGSize(width: 1.2, height: 1.2) : CGSize(width: 1, height: 1))
+                                            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hovering.5)
+                                    )
                                     Text("Learn EOM")
                                         
                                 }
@@ -227,16 +437,30 @@ struct Combined: View {
                         }, label: "Education")
                     }
                 }
-                Terminal(output: out)
-                    .frame(height: 224)
+                Terminal(output: out) {
+                    Rectangle()
+                        .foregroundStyle(Color.scheme(for: colorScheme).opacity(0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 30))
+                        .allowsHitTesting(false)
+                }
+                    .frame(height: 240)
                     .scrollContentBackground(.hidden)
-                    .background(RGB(32, 38, 44))
+                    .padding(25)
             }
             Divider()
 
-            CodeEditor(text: programText)
-                .scrollContentBackground(.hidden)
-                .background(RGB(28, 32, 36))
+            BorderedTextEditor(text: $attributedText, padding: 20, borderSize: 50, content: {
+                Rectangle()
+                    .foregroundStyle(Color.scheme(for: colorScheme).opacity(0.6))
+                    .clipShape(RoundedRectangle(cornerRadius: 30))
+                    .allowsHitTesting(false)
+            })
+            .onAppear {
+                attributedText = AttributedString(programText.programText)
+            }
+            .onChange(of: attributedText) { _, newValue in
+                programText.programText = String(newValue.characters)
+            }
             
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

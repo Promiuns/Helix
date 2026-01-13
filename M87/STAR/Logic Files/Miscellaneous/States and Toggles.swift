@@ -1,4 +1,5 @@
 internal import Combine
+import SwiftUI
 
 final class RunProgram: ObservableObject {
     @Published var didRun = false
