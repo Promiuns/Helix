@@ -1,6 +1,10 @@
 import Darwin
 internal import Combine
+
 indirect enum Node {
+	case null(ParserTimeType)
+    case intermediateType(String)
+    case type(Type)
     case infix(op: Node, num1: Node, num2: Node?)
     case number(Double)
     case id(String)
@@ -32,9 +36,15 @@ indirect enum Node {
     case filler
     case `struct`(String, [Node])
     case create
+    case emparr
+    case mod
     
     var text: String {
         switch self {
+		case .null:
+			return "null"
+        case .intermediateType(let str):
+            return str
         case .number(let num):
             return "\(num)"
         case .id(let id):
@@ -118,18 +128,34 @@ indirect enum Node {
             return name + ": \((args.map { $0.text }).joined(separator: ", "))"
         case .arrow:
             return "->"
+        case .mod:
+            return "%"
+        case .emparr:
+            return "emparr"
+        case .type(let type):
+            return type.desc()
         }
     }
 }
 
-struct Linker {
-    let position: Int
-    let token: Token
+extension Node {
+    static func ==(left: Node, right: Node) -> Bool {
+        return left.text == right.text
+    }
 }
 
-enum ParserErrors: Error {
+enum ParserErrors: Error, CustomStringConvertible {
     case parserTypeMismatch
     case parserNotKnown
+    
+    var description: String {
+        switch self {
+        case .parserNotKnown:
+            return "Parser cannot determine "
+        case .parserTypeMismatch:
+            return "Parser used incorrect type "
+        }
+    }
 }
 
 enum minusDisambiguation: CustomStringConvertible {
@@ -191,7 +217,7 @@ final class ExpressionParser: ObservableObject {
     }
     
     @discardableResult
-    func parseExpression(expression: String) throws -> Node {
+    func parseExpression(expression: String, index: Int) throws -> Node {
         let t = try lexer.lexer(plaintext: expression)
         func binary_or_unary(lastTerm: Token?) -> minusDisambiguation {
             /*
@@ -239,7 +265,7 @@ final class ExpressionParser: ObservableObject {
             }
             
             switch lastTerm.type {
-            case .identifier:
+			case .identifier, .type, .keyword:
                 return .callParen
             case .op, .lParen:
                 return .groupParen
@@ -256,6 +282,8 @@ final class ExpressionParser: ObservableObject {
             let last: Token? = index - 1 >= 0 ? t[index - 1] : nil
             let next: Token? = index + 1 < t.count ? t[index + 1] : nil
             switch (current.text, current.type) {
+			case ("null", .keyword):
+				temp.append(.id("null"))
             case ("create", .keyword):
                 temp.append(.create)
             case (let num, .numLiteral):
@@ -304,9 +332,13 @@ final class ExpressionParser: ObservableObject {
                     temp.append(.or)
                 case "->":
                     temp.append(.arrow)
+                case "%":
+                    temp.append(.mod)
                 default:
                     temp.append(.fallback(op))
                 }
+            case (let str, .type):
+                temp.append(.intermediateType(str))
             case (_, .lParen):
                 temp.append(.leftParenthesis(call_or_group(lastTerm: last)))
             case (_, .rParen):
@@ -315,7 +347,6 @@ final class ExpressionParser: ObservableObject {
                 temp.append(.id(id))
             case (_, .lSquare):
                 temp.append(.leftSquare)
-
             case (_, .rSquare):
                 temp.append(.rightSquare)
             case (let text, _):
@@ -324,14 +355,11 @@ final class ExpressionParser: ObservableObject {
         }
         var numberStack: [Node] = []
         var operatorStack: [Node] = []
-        do {
-            print(temp)
-            print(try resolveCallOrCreateParentheses(temp))
-        } catch {
-            print("n")
-        }
-        for element in try resolveCallOrCreateParentheses(temp) {
+        
+        for element in try resolveCallOrCreateParentheses(try resolveTypes(temp)) {
             switch element {
+			case .null(_):
+				numberStack.append(element)
             case .create:
                 break
             case .number(_):
@@ -352,6 +380,8 @@ final class ExpressionParser: ObservableObject {
             case .multiply:
                 operatorStack.append(element)
             case .divide:
+                operatorStack.append(element)
+            case .mod:
                 operatorStack.append(element)
             case .equals:
                 operatorStack.append(element)
@@ -412,12 +442,134 @@ final class ExpressionParser: ObservableObject {
                 numberStack.append(element)
             case .struct(let strName, let strArg):
                 numberStack.append(.struct(strName, strArg))
+            case .emparr:
+                numberStack.append(.emparr)
+            case .type(let T):
+                numberStack.append(.type(T))
+            case .intermediateType(_):
+                break
             }
         }
-        // MARK: - PASS 1: Resolve function calls:  foo(c ... )
+        // MARK: - PASS 1: Resolve types
+        
+        func resolveTypes(_ nodes: [Node]) throws -> [Node] {
+            
+			func resolveOneType(_ nodes: [Node]) throws -> Type {
+				/// assume the parameter `nodes` is the type as `[Node]` form
+				/// if we had something like `array(optional(number))`, we should get `[array, optional, string]`
+				var types: [String] = []
+				for node in nodes {
+					switch node {
+					case .intermediateType(let strType):
+						types.append(strType)
+					default:
+						()
+					}
+				}
+				
+				func constructType(currentlyConstructed: inout Type?, idx: Int) throws {
+					guard types.indices.contains(idx) else {
+						throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+					}
+					if idx == 0 {
+						switch types[0] {
+						case "number":
+							currentlyConstructed = .number
+						case "string":
+							currentlyConstructed = .string
+						case "boolean":
+							currentlyConstructed = .boolean
+						case "void":
+							currentlyConstructed = .void
+						case "array":
+							guard let c = currentlyConstructed else {
+								throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+							}
+							currentlyConstructed = .array(c)
+						case "optional":
+							guard let c = currentlyConstructed else {
+								throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+							}
+							currentlyConstructed = .optional(c)
+							
+						default:
+							throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+						}
+						return
+					}
+					let currentType = types[idx]
+					switch currentType {
+					case "number":
+						currentlyConstructed = .number
+					case "string":
+						currentlyConstructed = .string
+					case "boolean":
+						currentlyConstructed = .boolean
+					case "void":
+						currentlyConstructed = .void
+					case "array":
+						guard let c = currentlyConstructed else {
+							throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+						}
+						currentlyConstructed = .array(c)
+					case "optional":
+						guard let c = currentlyConstructed else {
+							throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+						}
+						currentlyConstructed = .optional(c)
+					default:
+						throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+					}
+					try constructType(currentlyConstructed: &currentlyConstructed, idx: idx - 1)
+				}
+				
+				var constructingType: Type? = nil
+				try constructType(currentlyConstructed: &constructingType, idx: types.count - 1)
+				guard let constructedType = constructingType else {
+					throw ErrorInformation(error: .expressionParserError(.parserTypeMismatch), line: index)
+				}
+				return constructedType
+			}
+			
+			var runthrough = 0
+			var stack: [Node] = []
+			while runthrough < nodes.count {
+				if case .intermediateType(let type) = nodes[runthrough] {
+					switch type {
+					case "number", "string", "boolean", "void":
+						stack.append(.type(try resolveOneType([nodes[runthrough]])))
+					case "array":
+						guard let rightParenthesis = try searchCorresponding(starter: [.leftParenthesis(.callParen), .leftParenthesis(.groupParen)], end: [.rightParenthesis], tokens: nodes, startingIndex: runthrough+1) else {
+							throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+						}
+						stack.append(.type(try resolveOneType(Array(nodes[runthrough...rightParenthesis]))))
+						runthrough = rightParenthesis + 1
+						continue
+					case "optional":
+						guard let rightParenthesis = try searchCorresponding(starter: [.leftParenthesis(.callParen), .leftParenthesis(.groupParen)], end: [.rightParenthesis], tokens: nodes, startingIndex: runthrough+1) else {
+							throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+						}
+						stack.append(.type(try resolveOneType(Array(nodes[runthrough...rightParenthesis]))))
+						runthrough = rightParenthesis + 1
+						continue
+					default:
+						throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+					}
+				} else {
+					stack.append(nodes[runthrough])
+				}
+				runthrough += 1
+			}
+			print(stack)
+			return stack
+        }
+        
+        
+        // MARK: - PASS 2: Resolve function calls:  foo(c ... )
         // Turns:  [.id("foo"), .leftParenthesis(.callParen), ...args..., .rightParenthesis]
         // Into:   [.function("foo", [arg1Node, arg2Node, ...])]
         func resolveCallOrCreateParentheses(_ nodes: [Node]) throws -> [Node] {
+			print(nodes)
             var result: [Node] = []
             var i = 0
             var creatingStruct = false
@@ -431,26 +583,38 @@ final class ExpressionParser: ObservableObject {
                 if i + 1 < nodes.count,
                    case .id(let name) = nodes[i],
                    case .leftParenthesis(.callParen) = nodes[i + 1] {
-
                     guard let end = try searchCorresponding(
                         starter: [.leftParenthesis(.callParen), .leftParenthesis(.groupParen)],
                         end: [.rightParenthesis],
                         tokens: nodes,
                         startingIndex: i + 1
                     ) else {
-                        throw ParserErrors.parserNotKnown
+                        throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
                     }
 
                     let argNodes = Array(nodes[(i + 2)..<end])
 
                     let argSlices = splitByComma(argNodes)
                     let parsedArgs = try argSlices.map { try parseNodePipeline($0) }
-                    print(parsedArgs)
                     if creatingStruct {
                         result.append(.struct(name, parsedArgs))
                         creatingStruct.toggle()
                     } else {
-                        result.append(.function(name, parsedArgs))
+						print("weweweweweweweweewewewewewewewewewewewewewewewew")
+						if name == "null" {
+							guard parsedArgs.count == 1 else {
+								throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+							}
+							result.append(.null(parseType(typeString: parsedArgs.first!.text, line: index)))
+						} else if name == "id" {
+							guard parsedArgs.count == 1 else {
+								throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+							}
+							result.append(.id(parsedArgs.first!.text))
+						} else {
+							result.append(.function(name, parsedArgs))
+						}
+						
                     }
                     i = end + 1
                 } else {
@@ -488,7 +652,7 @@ final class ExpressionParser: ObservableObject {
             return res
         }
 
-        // MARK: - PASS 2: Resolve grouping parentheses: (g ... )
+        // MARK: - PASS 3: Resolve grouping parentheses: (g ... )
         // Turns:  [.leftParenthesis(.groupParen), ...expr..., .rightParenthesis]
         // Into:   [subtreeNode]
         func resolveGroupParentheses(_ nodes: [Node]) throws -> [Node] {
@@ -500,12 +664,12 @@ final class ExpressionParser: ObservableObject {
 
                 if case .leftParenthesis(.groupParen) = cur {
                     guard let end = try searchCorresponding(
-                        starter: [.leftParenthesis(.groupParen)],
+                        starter: [.leftParenthesis(.groupParen), .leftParenthesis(.callParen)],
                         end: [.rightParenthesis],
                         tokens: nodes,
                         startingIndex: i
                     ) else {
-                        throw ParserErrors.parserNotKnown
+                        throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
                     }
 
                     let inner = Array(nodes[(i + 1)..<end])
@@ -519,7 +683,7 @@ final class ExpressionParser: ObservableObject {
 
                 // If any raw parens remain here, it's an error
                 if case .rightParenthesis = cur {
-                    throw ParserErrors.parserNotKnown
+                    throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
                 }
 
                 result.append(cur)
@@ -529,7 +693,7 @@ final class ExpressionParser: ObservableObject {
             return result
         }
 
-        // MARK: - PASS 3: Resolve arrays ([a, b, c, [d, e, f]])
+        // MARK: - PASS 4: Resolve arrays ([a, b, c, [d, e, f]])
         func resolveArrayLiterals(_ nodes: [Node]) throws -> [Node] {
             var result: [Node] = []
             var index = 0
@@ -544,7 +708,7 @@ final class ExpressionParser: ObservableObject {
                         tokens: nodes,
                         startingIndex: index
                     ) else {
-                        throw ParserErrors.parserNotKnown
+                        throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
                     }
                     let inner = Array(nodes[(index + 1)..<end])
 
@@ -558,7 +722,7 @@ final class ExpressionParser: ObservableObject {
                     // split by commas at depth 0, then parse each element via full pipeline
                     let parts = splitByComma(inner)
                     let elements = try parts.map { part -> Node in
-                        if part.isEmpty { throw ParserErrors.parserNotKnown } // trailing comma / ,, etc
+                        if part.isEmpty { throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index) } // trailing comma / ,, etc
                         return try parseNodePipeline(part)
                     }
 
@@ -576,14 +740,15 @@ final class ExpressionParser: ObservableObject {
         // MARK: - Full pipeline on already-normalized [Node]
         // (Call-parens first, then group-parens, then precedence)
         func parseNodePipeline(_ nodes: [Node]) throws -> Node {
-            let callsResolved  = try resolveCallOrCreateParentheses(nodes)
+			let typesResolved = try resolveTypes(nodes)
+            let callsResolved  = try resolveCallOrCreateParentheses(typesResolved)
             let groupsResolved = try resolveGroupParentheses(callsResolved)
             let arraysResolved = try resolveArrayLiterals(groupsResolved)
             return try parseNodeList(arraysResolved)
         }
 
         // MARK: - Split by commas at top-level, ignoring commas inside parentheses
-        // Works because your nodes still contain (g/(c and ) before we collapse them.
+        // Works because nodes still contain (g/(c and ) before we collapse them.
         func splitTopLevel(_ nodes: [Node], separator: Node) -> [[Node]] {
             var parts: [[Node]] = []
             var current: [Node] = []
@@ -618,13 +783,13 @@ final class ExpressionParser: ObservableObject {
             return parts
         }
 
-        // MARK: - Your precedence merge (works on a flat list with NO parens)
+        // MARK: - Precedence merge (works on a flat list with NO parens)
         func parseNodeList(_ nodes: [Node]) throws -> Node {
             // No parentheses should exist here
             for n in nodes {
-                if case .leftParenthesis = n { throw ParserErrors.parserNotKnown }
-                if case .rightParenthesis = n { throw ParserErrors.parserNotKnown }
-                if case .comma = n { throw ParserErrors.parserNotKnown }
+                if case .leftParenthesis = n { throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index) }
+                if case .rightParenthesis = n { throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index) }
+                if case .comma = n { throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index) }
             }
 
             var numberStack: [Node] = []
@@ -632,7 +797,7 @@ final class ExpressionParser: ObservableObject {
 
             for element in nodes {
                 switch element {
-                case .number, .id, .string, .boolean, .array, .function, .struct:
+				case .number, .id, .string, .boolean, .array, .function, .struct, .type, .null:
                     numberStack.append(element)
 
                 // unary operators live in numberStack in your design
@@ -641,74 +806,78 @@ final class ExpressionParser: ObservableObject {
 
                 case .add, .subtract(.binaryMinus), .multiply, .divide,
                      .equals, .notEquals, .greater, .greaterEqual,
-                     .less, .lessEqual, .and, .or, .dot, .arrow:
+                     .less, .lessEqual, .and, .or, .dot, .arrow, .mod:
                     operatorStack.append(element)
                     
                 case .infix(op: _, num1: _, num2: _):
                     numberStack.append(element)
 
                 default:
-                    throw ParserErrors.parserNotKnown
+                    throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
                 }
             }
+            print(numberStack)
+            if numberStack.count == 1 {
+                print("ENTERED")
+                return numberStack.first!
+            } else {
+                let precedence: [String: Int] = [
+                    ".m": 6, ".n": 6,
+                    "-u": 5, "!": 5,
+                    "*": 4, "/": 4, "%": 4,
+                    "+": 3, "-b": 3,
+                    "->": 1,
+                    "==": 1, "!=": 1, ">": 1, "<": 1, ">=": 1, "<=": 1,
+                    "&&": 0, "||": 0
+                ]
+                // Merge highest -> lowest
+                for level in stride(from: 6, through: 0, by: -1) {
+                    var i = 0
+                    while i < operatorStack.count {
+                        let op = operatorStack[i]
+                        if precedence[op.text] == level {
 
-            let precedence: [String: Int] = [
-                ".m": 6, ".n": 6,
-                "-u": 5, "!": 5,
-                "*": 4, "/": 4,
-                "+": 3, "-b": 3,
-                "->": 1,
-                "==": 1, "!=": 1, ">": 1, "<": 1, ">=": 1, "<=": 1,
-                "&&": 0, "||": 0
-            ]
+                            // Unary operators should never be in operatorStack in architecture
+                            if op.text == "-u" || op.text == "!" {
+                                throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+                            }
 
-            // Merge highest → lowest
-            for level in stride(from: 5, through: 0, by: -1) {
-                var i = 0
-                while i < operatorStack.count {
-                    let op = operatorStack[i]
-                    if precedence[op.text] == level {
+                            // Binary merge
+                            guard i < numberStack.count - 1 else { throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index) }
 
-                        // Unary operators should never be in operatorStack in your architecture
-                        if op.text == "-u" || op.text == "!" {
-                            throw ParserErrors.parserNotKnown
+                            let node = Node.infix(op: op, num1: (numberStack.filter { precedence[$0.text] != 4 })[i], num2: numberStack[i + 1])
+                            numberStack.remove(at: i + 1)
+                            numberStack[i] = node
+                            operatorStack.remove(at: i)
+
+                            continue // do not do i += 1, because we removed at i
                         }
 
-                        // Binary merge
-                        guard i < numberStack.count - 1 else { throw ParserErrors.parserNotKnown }
-
-                        let node = Node.infix(op: op, num1: (numberStack.filter { precedence[$0.text] != 4 })[i], num2: numberStack[i + 1])
-                        numberStack.remove(at: i + 1)
-                        numberStack[i] = node
-                        operatorStack.remove(at: i)
-
-                        continue // do NOT i += 1, because we removed at i
+                        i += 1
                     }
 
-                    i += 1
-                }
-
-                // Now handle unary at this precedence level (4) by scanning numberStack
-                if level == 4 {
-                    var j = 0
-                    while j < numberStack.count {
-                        let n = numberStack[j]
-                        if n.text == "-u" || n.text == "!" {
-                            guard j + 1 < numberStack.count else { throw ParserErrors.parserNotKnown }
-                            let prefix = Node.infix(op: n, num1: numberStack[j + 1], num2: nil)
-                            numberStack.remove(at: j + 1)
-                            numberStack[j] = prefix
-                            continue
+                    // handle unary at this precedence level (4) by scanning numberStack
+                    if level == 4 {
+                        var j = 0
+                        while j < numberStack.count {
+                            let n = numberStack[j]
+                            if n.text == "-u" || n.text == "!" {
+                                guard j + 1 < numberStack.count else { throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index) }
+                                let prefix = Node.infix(op: n, num1: numberStack[j + 1], num2: nil)
+                                numberStack.remove(at: j + 1)
+                                numberStack[j] = prefix
+                                continue
+                            }
+                            j += 1
                         }
-                        j += 1
                     }
                 }
+                guard numberStack.count == 1 else {
+                    throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
+                }
+                
+                return numberStack.first ?? .filler
             }
-            guard numberStack.count == 1 else {
-                throw StatementError.temp
-            }
-            
-            return numberStack.first ?? .filler
         }
         return try parseNodePipeline(temp)
     }
@@ -729,7 +898,7 @@ final class ExpressionParser: ObservableObject {
                 return index
             }
             guard tokens.count > index else {
-                throw ParserErrors.parserNotKnown
+                throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
             }
             index += 1
         }
@@ -737,7 +906,7 @@ final class ExpressionParser: ObservableObject {
         return nil
     }
     
-    func mapOperator(_ node: Node) throws -> Operators {
+    func mapOperator(_ node: Node, index: Int) throws -> Operators {
         switch node {
         case .add:
             return .add
@@ -769,15 +938,18 @@ final class ExpressionParser: ObservableObject {
             return .not
         case .arrow:
             return .arrow
+        case .mod:
+            return .mod
         default:
-            throw ParserErrors.parserTypeMismatch
+            throw ErrorInformation(error: .expressionParserError(.parserNotKnown), line: index)
         }
     }
     
     func lower(_ node: Node, index: Int) throws -> Expression {
-        print(node)
+		print("FNewfhewuwhrwueihruewhruehwreuwirhueiwrehwiruewh", node)
         switch node {
-
+        case .type(let T):
+            return .type(T)
         case .number(let n):
             return .number(n)
 
@@ -786,7 +958,10 @@ final class ExpressionParser: ObservableObject {
 
         case .boolean(let b):
             return .boolean(b)
-
+			
+		case .null(let nullType):
+			return .null(nullType)
+			
         case .id(let name):
             return .variable(name, line: index)
         case .array(let nodes):
@@ -796,15 +971,24 @@ final class ExpressionParser: ObservableObject {
                 name: .variable(name, line: index),
                 arguments: try args.map { try lower($0, index: index) }, line: index
             )
+        case .struct(let id, _):
+            return .structure(name: id)
         case .infix(op: .dot(.memberDot), num1: let base, num2: let member?):
-            guard case .id(let memberName) = member else {
+            if case .id(let memberName) = member {
+                return .dot(
+                    structName: try lower(base, index: index),
+                    member: memberName, args: nil, line: index
+                )
+            } else if case .function(let memberName, let args) = member {
+                return .dot(
+                    structName: try lower(base, index: index),
+                    member: memberName, args: try args.map { try lower($0, index: index) }, line: index
+                )
+            } else {
                 throw ParserErrors.parserTypeMismatch
             }
 
-            return .dot(
-                structName: try lower(base, index: index),
-                member: memberName, line: index
-            )
+            
         case .infix(op: .dot(.numberDot), num1: let integer, num2: let decimal):
             guard let decimal = decimal, case .number(let int) = integer, case .number(let dec) = decimal else {
                 throw ParserErrors.parserTypeMismatch
@@ -812,18 +996,18 @@ final class ExpressionParser: ObservableObject {
             
             return .number(int + pow(10.0, Double(String(Int(dec)).count * -1)) * dec)
         case .infix(op: let op, num1: let expr, num2: nil):
-            let mapped = try mapOperator(op)
+            let mapped = try mapOperator(op, index: index)
             return .operation(
                 op: mapped,
                 val1: try lower(expr, index: index),
-                val2: nil
+                val2: nil, line: index
             )
         case .infix(op: let op, num1: let lhs, num2: let rhs?):
-            let mapped = try mapOperator(op)
+            let mapped = try mapOperator(op, index: index)
             return .operation(
                 op: mapped,
                 val1: try lower(lhs, index: index),
-                val2: try lower(rhs, index: index)
+                val2: try lower(rhs, index: index), line: index
             )
         default:
             throw ParserErrors.parserNotKnown

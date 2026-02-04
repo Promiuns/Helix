@@ -12,7 +12,7 @@ struct M87App: App {
     @Environment(\.colorScheme) var colorScheme
     @StateObject var didRun = RunProgram()
     @StateObject var programText = ProgramText()
-    @StateObject var test = ProgramRunner(program: [])
+    @StateObject var test = ProgramRunner()
     @StateObject var statementParser = StatementParser()
     @StateObject var parser = ExpressionParser()
 

@@ -1,6 +1,7 @@
 import Foundation
 
 enum TokenType {
+    case type
     case keyword
     case identifier
     case lParen
@@ -39,14 +40,20 @@ final class Lexer {
             var inQuotes = false
             var currentTokens: [Token] = []
             let opSet: Set<String> = [
-                "+", "-", "*", "=", "/", ".", "!", "==", "&", "|", "!=", ">", "<", ">=", "<=", ",", "[", "]", "{", "}", "(", ")", "->", "&&", "||", ";", ":", "\n", "=>"
+                "+", "-", "*", "=", "/", ".", "!", "==", "&", "|", "!=", ">", "<", ">=", "<=", ",", "[", "]", "{", "}", "(", ")", "->", "&&", "||", ";", ":", "\n", "=>", "%"
+            ]
+            
+            let types: Set<String> = [
+                "number", "string", "optional", "array", "boolean", "void"
             ]
             let keywords: Set<String> = [
-                "var", "if", "for", "while", "struct", "copy", "let", "else", "create", "in", "fn", "return"
+                "var", "if", "for", "while", "struct", "copy", "let", "else", "create", "in", "fn", "return", "null"
             ]
             func tokenType(string: String) -> Token {
                 switch string {
-                case "+", "-", "*", "=", "/", "!", "==", "!=", ">", "<", ">=", "<=", "&&", "||", "->":
+                case _ where types.contains(string):
+                    return Token(text: string, type: .type)
+                case "+", "-", "*", "=", "/", "!", "==", "!=", ">", "<", ">=", "<=", "&&", "||", "->", "%":
                     return Token(text: string, type: .op)
                 case "\n":
                     line += 1
@@ -103,7 +110,7 @@ final class Lexer {
                     currentToken = ""
                     i += 1
                     continue
-                case let char where opSet.firstIndex(of: char) != nil: // a character thats in the op set
+                case let char where opSet.contains(char): // a character thats in the op set
                     if opSet.contains(char) {
                         if i+1 < plaintext.count {
                             let peek = String(plaintext[plaintext.index(plaintext.startIndex, offsetBy: i+1)])
