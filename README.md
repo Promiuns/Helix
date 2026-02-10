@@ -89,6 +89,8 @@ ___
 |`>=`|compares if the first number is greater than or equal to the second|
 |`<=`|compares if the first number is less than or equal to the second|
 |`!`|returns the opposite of a boolean value, so !false returns true, and !true returns false|
+|`&`|makes a reference to a variable, not a value|
+|`*`|if marked before a variable, it dereferences the variable (e.g., if x was a pointer to y that held 2, then *x returns 2)|
 
 ### Modifying Variables
   When running programs, generally, you want to modify data. To do that, simply put the variable name (say, x), along with '='. After that, just put whatever you want as long as it is the type the variable was originally created as (so no putting a number value to a variable that accepts string).
