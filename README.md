@@ -46,7 +46,8 @@ ___
 ___
 
 ### What Types Are There?
-  Helix has 6 primitive types- 4 type values (`string`, `number`, `boolean`, `void`), and 2 type wrappers (`array`, `optional`).
+  Helix has 7 primitive types- 4 type values (`string`, `number`, `boolean`, `void`), and 3 type wrappers (`array`, `optional`, `pointer`).
+  
 **string**
 Represents text. There is no `character` type.
 
@@ -65,6 +66,9 @@ Represents a collection of `type` , i.e. `array(number)` means a collection of n
 **optional(type)**
 Represents that the type (or more accurately, the value) can be `null` (no value). Note that `null(type)` is **not** the same as void.
 **IMPORTANT**: `null` is not an "all type" null. Its type needs to be specified, so if you have a variable whose type is `optional(number)` and you want to show that it has no value, the correct syntax is: `null(number)`
+
+**pointer(type)**
+Represents a reference to a value with type **type**. If you had `&num`, that can be fed into a variable declaration with type `pointer(number)`. So basically, `&num` gives
 
 **Types These Primitives can Represent**
 - character
